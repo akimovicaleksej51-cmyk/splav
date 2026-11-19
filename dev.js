@@ -2,9 +2,11 @@
 import http from 'node:http';
 import room from './api/room.js';
 import latest from './api/latest.js';
+import social from './api/social.js';
+import health from './api/health.js';
+const routes = { '/api/room': room, '/api/latest': latest, '/api/social': social, '/api/health': health };
 http.createServer((req, res) => {
-  const p = new URL(req.url, 'http://x').pathname;
-  if (p === '/api/room') return room(req, res);
-  if (p === '/api/latest') return latest(req, res);
+  const h = routes[new URL(req.url, 'http://x').pathname];
+  if (h) return h(req, res);
   res.statusCode = 404; res.end('not found');
 }).listen(process.env.PORT || 8787, () => console.log('dev server on', process.env.PORT || 8787));

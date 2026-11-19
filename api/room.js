@@ -1,38 +1,21 @@
 // «Слушать вместе»: хозяин публикует состояние, гости забирают его опросом
 import crypto from 'node:crypto';
 import store from '../lib/store.js';
+import { clean, slimTrack, readBody, sender } from '../lib/http.js';
 
 const TTL = 6 * 3600;                 // комната живёт 6 часов после последнего изменения
-const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const code6 = () => Array.from(crypto.randomBytes(6), b => ALPHA[b % ALPHA.length]).join('');
 const hash = s => crypto.createHash('sha256').update(String(s)).digest('hex');
-const clean = (s, n = 80) => String(s ?? '').slice(0, n);
-
-function slimTrack(t) {
-  if (!t || typeof t !== 'object') return null;
-  return {
-    source: clean(t.source, 10), rawId: clean(t.rawId, 120), title: clean(t.title, 200), artist: clean(t.artist, 200),
-    album: clean(t.album, 200), cover: /^https:\/\//.test(t.cover || '') ? clean(t.cover, 500) : null,
-    duration: Math.max(0, Math.min(36000, Number(t.duration) || 0)), albumId: t.albumId ? clean(t.albumId, 40) : null,
-  };
-}
-
-async function readBody(req) {
-  if (req.body && typeof req.body === 'object') return req.body;
-  let raw = '';
-  for await (const ch of req) { raw += ch; if (raw.length > 20000) break; }
-  try { return JSON.parse(raw || '{}'); } catch { return {}; }
-}
+const codeOf = s => String(s ?? '').replace(/\D/g, '').slice(0, 6);
+const stateOf = s => ({ track: slimTrack(s && s.track), playing: !!(s && s.playing), position: Math.max(0, Number(s && s.position) || 0), ts: Date.now() });
 
 export default async function handler(req, res) {
-  res.setHeader('Cache-Control', 'no-store');
-  const send = (code, obj) => { res.statusCode = code; res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(JSON.stringify(obj)); };
+  const send = sender(res);
   try {
     if (req.method === 'GET') {
       const u = new URL(req.url, 'http://x');
-      const code = clean(u.searchParams.get('code'), 6).toUpperCase();
-      const room = await store.get('room:' + code);
-      if (!room) return send(404, { error: 'Комната не найдена или закрыта' });
+      const code = codeOf(u.searchParams.get('code'));
+      const room = code.length === 6 && await store.get('room:' + code);
+      if (!room) return send(404, { error: 'Комнаты с таким кодом нет. Проверьте цифры' });
       const since = Number(u.searchParams.get('v') || 0);
       const out = { v: room.v, now: Date.now(), host: room.hostName, closed: !!room.closed };
       if (room.v !== since) out.state = room.state;
@@ -48,22 +31,23 @@ export default async function handler(req, res) {
     const action = b.action;
 
     if (action === 'create') {
-      let code; for (let i = 0; i < 5; i++) { code = code6(); if (!(await store.get('room:' + code))) break; }
       const hostKey = crypto.randomBytes(18).toString('base64url');
-      const room = { v: 1, hostName: clean(b.name || 'Хозяин', 40), hostKey: hash(hostKey), state: { track: null, playing: false, position: 0, ts: Date.now() }, created: Date.now() };
-      await store.set('room:' + code, room, TTL);
-      return send(200, { code, hostKey });
+      const room = { v: 1, hostName: clean(b.name || 'Хозяин', 40), hostKey: hash(hostKey), state: stateOf(b.state), created: Date.now() };
+      for (let i = 0; i < 8; i++) {
+        const code = String(crypto.randomInt(100000, 1000000));
+        if (await store.setnx('room:' + code, room, TTL)) return send(200, { code, hostKey, v: 1 });
+      }
+      return send(503, { error: 'Не удалось подобрать код, попробуйте ещё раз' });
     }
 
-    const code = clean(b.code, 6).toUpperCase();
-    const room = await store.get('room:' + code);
-    if (!room) return send(404, { error: 'Комната не найдена или закрыта' });
+    const code = codeOf(b.code);
+    const room = code.length === 6 && await store.get('room:' + code);
+    if (!room) return send(404, { error: 'Комнаты с таким кодом нет. Проверьте цифры' });
 
     if (action === 'update' || action === 'close') {
       if (hash(b.hostKey) !== room.hostKey) return send(403, { error: 'Управлять комнатой может только хозяин' });
       if (action === 'close') { room.closed = true; room.v++; await store.set('room:' + code, room, 600); return send(200, { ok: true }); }
-      const s = b.state || {};
-      room.state = { track: slimTrack(s.track), playing: !!s.playing, position: Math.max(0, Number(s.position) || 0), ts: Date.now() };
+      room.state = stateOf(b.state);
       room.v++;
       await store.set('room:' + code, room, TTL);
       return send(200, { v: room.v, now: Date.now() });
