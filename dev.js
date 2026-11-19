@@ -4,7 +4,8 @@ import room from './api/room.js';
 import latest from './api/latest.js';
 import social from './api/social.js';
 import health from './api/health.js';
-const routes = { '/api/room': room, '/api/latest': latest, '/api/social': social, '/api/health': health };
+import join from './api/join.js';
+const routes = { '/api/room': room, '/api/latest': latest, '/api/social': social, '/api/health': health, '/api/join': join };
 http.createServer((req, res) => {
   const h = routes[new URL(req.url, 'http://x').pathname];
   if (h) return h(req, res);

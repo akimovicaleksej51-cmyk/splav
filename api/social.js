@@ -7,6 +7,7 @@ const hash = s => crypto.createHash('sha256').update(String(s)).digest('hex');
 const NAME_RE = /^[a-z0-9_.]{3,20}$/;
 const normName = s => String(s || '').trim().replace(/^@/, '').toLowerCase();
 const pair = (a, b) => 'chat:' + [a, b].sort().join(':');
+const REACTIONS = ['🔥', '❤️', '😂', '😮', '👎'];
 const MAX_FRIENDS = 300, MAX_REQS = 100, CHAT_KEEP = 300, INBOX_KEEP = 150;
 
 async function users(ids) {
@@ -97,7 +98,27 @@ export default async function handler(req, res) {
       case 'chat': {
         const fr = (await store.hgetall('friends:' + me.id)) || {};
         if (!fr[other]) return fail(403, 'Этот человек больше не в друзьях');
-        return send(200, { messages: (await store.lrange(pair(me.id, other), 0, 99)) || [] });
+        const [messages, reacts] = await Promise.all([store.lrange(pair(me.id, other), 0, 99), store.hgetall('react:' + pair(me.id, other))]);
+        const reactions = Object.fromEntries(Object.entries(reacts || {}).map(([k, v]) => [k, typeof v === 'string' ? JSON.parse(v) : v]));
+        return send(200, { messages: messages || [], reactions });
+      }
+      case 'react': {
+        // реакция на присланный трек: одна на человека, пустая — убрать
+        const fr = (await store.hgetall('friends:' + me.id)) || {};
+        if (!fr[other]) return fail(403, 'Этот человек больше не в друзьях');
+        const e = REACTIONS.includes(b.e) ? b.e : '';
+        const mid = clean(b.msg, 20);
+        const list = (await store.lrange(pair(me.id, other), 0, CHAT_KEEP - 1)) || [];
+        const msg = list.find(m => m.id === mid);
+        if (!msg) return fail(404, 'Сообщение не найдено');
+        const rk = 'react:' + pair(me.id, other);
+        const cur = ((await store.hgetall(rk)) || {})[mid];
+        const map = typeof cur === 'string' ? JSON.parse(cur) : (cur || {});
+        if (e) map[me.id] = e; else delete map[me.id];
+        await store.hset(rk, mid, JSON.stringify(map));
+        if (e) await store.lpush('inbox:' + other, { id: crypto.randomBytes(6).toString('base64url'), type: 'react', f: me.id, fn: me.name, to: other, msg: mid, e, title: msg.t && msg.t.title, ts: Date.now() }, INBOX_KEEP);
+        await bump(me.id, other);
+        return send(200, { reactions: map });
       }
       default: return fail(400, 'Неизвестное действие');
     }
